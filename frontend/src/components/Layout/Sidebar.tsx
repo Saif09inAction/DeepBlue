@@ -121,7 +121,7 @@ export default function Sidebar({ collapsed, onToggle }: Props) {
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                 className="flex-1 overflow-hidden"
               >
-                <p className="text-xs font-semibold text-white truncate">Saif Ahmed</p>
+                <p className="text-xs font-semibold text-white truncate">Saif Salmani</p>
                 <p className="text-[10px] text-slate-500 truncate">Platform Admin</p>
               </motion.div>
             )}

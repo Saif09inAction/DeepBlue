@@ -123,5 +123,5 @@ npm run dev
 
 ## Author
 
-**Saif** — B.Tech Final Year  
+**Saif Salmani** — B.Tech Final Year  
 GitHub: [@Saif09inAction](https://github.com/Saif09inAction)

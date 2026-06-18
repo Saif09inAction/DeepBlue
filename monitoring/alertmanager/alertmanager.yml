@@ -1,0 +1,161 @@
+################################################################################
+# DeepBlue – Alertmanager Configuration
+# Routes, receivers, inhibition, and silence configuration
+################################################################################
+
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'email-smtp.us-east-1.amazonaws.com:587'
+  smtp_from: 'alerts@deepblue.org'
+  smtp_auth_username: '{{ .ExternalLabels.smtp_username }}'
+  smtp_auth_password_file: /etc/alertmanager/secrets/smtp_password
+
+  slack_api_url_file: /etc/alertmanager/secrets/slack_webhook_url
+  pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+
+# ── Routing Tree ──────────────────────────────────────────────────────────────
+route:
+  group_by: ['alertname', 'cluster', 'namespace', 'team']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 3h
+  receiver: slack-default
+
+  routes:
+
+  # Critical alerts: Page on-call SRE via PagerDuty immediately
+  - match:
+      severity: critical
+    receiver: pagerduty-critical
+    group_wait: 0s
+    repeat_interval: 1h
+    continue: true
+
+  # Critical alerts: Also send to Slack #alerts-critical
+  - match:
+      severity: critical
+    receiver: slack-critical
+    continue: false
+
+  # Warning alerts: Send to Slack #alerts-warning
+  - match:
+      severity: warning
+    receiver: slack-warning
+    group_wait: 1m
+    repeat_interval: 4h
+
+  # Security alerts: Always page immediately
+  - match:
+      team: security
+    receiver: pagerduty-security
+    group_wait: 0s
+    repeat_interval: 30m
+    continue: true
+
+  # Data engineering alerts
+  - match:
+      team: data-engineering
+    receiver: slack-data-engineering
+    group_wait: 30s
+
+  # InfoSec / compliance
+  - match_re:
+      alertname: "^(UnauthorizedAPI|FalcoAlert|TLSCert).*"
+    receiver: email-security-team
+
+# ── Inhibit Rules ─────────────────────────────────────────────────────────────
+# Suppress warning when critical is firing for same target
+inhibit_rules:
+- source_match:
+    severity: critical
+  target_match:
+    severity: warning
+  equal: ['alertname', 'namespace', 'pod']
+
+- source_match:
+    alertname: APIServiceUnavailable
+  target_match_re:
+    alertname: 'API.*'
+  equal: ['namespace']
+
+# ── Receivers ─────────────────────────────────────────────────────────────────
+receivers:
+
+- name: slack-default
+  slack_configs:
+  - channel: '#deepblue-alerts'
+    send_resolved: true
+    title: '{{ template "slack.deepblue.title" . }}'
+    text: '{{ template "slack.deepblue.text" . }}'
+    color: '{{ template "slack.deepblue.color" . }}'
+    actions:
+    - type: button
+      text: 'Runbook 📖'
+      url: '{{ (index .Alerts 0).Annotations.runbook }}'
+    - type: button
+      text: 'Grafana 📊'
+      url: 'https://grafana.deepblue.org/d/deepblue-overview'
+    - type: button
+      text: 'Silence 🔕'
+      url: '{{ template "slack.deepblue.silence_url" . }}'
+
+- name: slack-critical
+  slack_configs:
+  - channel: '#deepblue-alerts-critical'
+    send_resolved: true
+    username: 'DeepBlue Alertmanager'
+    icon_emoji: ':rotating_light:'
+    title: '🚨 CRITICAL: {{ template "slack.deepblue.title" . }}'
+    text: '{{ template "slack.deepblue.text" . }}'
+    color: danger
+
+- name: slack-warning
+  slack_configs:
+  - channel: '#deepblue-alerts-warning'
+    send_resolved: true
+    username: 'DeepBlue Alertmanager'
+    icon_emoji: ':warning:'
+    title: '⚠️ WARNING: {{ template "slack.deepblue.title" . }}'
+    text: '{{ template "slack.deepblue.text" . }}'
+    color: warning
+
+- name: slack-data-engineering
+  slack_configs:
+  - channel: '#team-data-engineering'
+    send_resolved: true
+    title: '{{ template "slack.deepblue.title" . }}'
+    text: '{{ template "slack.deepblue.text" . }}'
+
+- name: pagerduty-critical
+  pagerduty_configs:
+  - service_key_file: /etc/alertmanager/secrets/pagerduty_integration_key
+    severity: '{{ if eq .CommonLabels.severity "critical" }}critical{{ else }}warning{{ end }}'
+    class: '{{ .CommonLabels.alertname }}'
+    component: '{{ .CommonLabels.namespace }}'
+    group: '{{ .CommonLabels.team }}'
+    description: '{{ template "pagerduty.deepblue.description" . }}'
+    details:
+      namespace: '{{ .CommonLabels.namespace }}'
+      pod: '{{ .CommonLabels.pod }}'
+      runbook: '{{ (index .Alerts 0).Annotations.runbook }}'
+      severity: '{{ .CommonLabels.severity }}'
+      cluster: '{{ .CommonLabels.cluster }}'
+
+- name: pagerduty-security
+  pagerduty_configs:
+  - service_key_file: /etc/alertmanager/secrets/pagerduty_security_key
+    severity: critical
+    class: security-incident
+    group: security-team
+    description: 'SECURITY ALERT: {{ template "pagerduty.deepblue.description" . }}'
+
+- name: email-security-team
+  email_configs:
+  - to: 'security@deepblue.org'
+    send_resolved: true
+    headers:
+      Subject: '[SECURITY] DeepBlue Alert: {{ .CommonLabels.alertname }}'
+
+# ── Templates ─────────────────────────────────────────────────────────────────
+templates:
+- /etc/alertmanager/templates/*.tmpl

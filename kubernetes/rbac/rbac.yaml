@@ -1,0 +1,215 @@
+################################################################################
+# DeepBlue – Kubernetes RBAC Definitions
+# ClusterRoles, Roles, and Bindings for all platform users and service accounts
+################################################################################
+
+---
+# ── Platform Admin ClusterRole ────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deepblue-platform-admin
+  labels:
+    project: deepblue
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+
+---
+# ── Read-Only Auditor ClusterRole ─────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deepblue-readonly-auditor
+  labels:
+    project: deepblue
+rules:
+- apiGroups: ["", "apps", "batch", "autoscaling", "networking.k8s.io", "policy"]
+  resources:
+  - pods
+  - pods/log
+  - deployments
+  - replicasets
+  - services
+  - endpoints
+  - configmaps
+  - namespaces
+  - nodes
+  - persistentvolumes
+  - persistentvolumeclaims
+  - horizontalpodautoscalers
+  - ingresses
+  - networkpolicies
+  - events
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list"]
+
+---
+# ── CI/CD Deployer ClusterRole ────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deepblue-cicd-deployer
+  labels:
+    project: deepblue
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["services", "configmaps", "serviceaccounts"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["argoproj.io"]
+  resources: ["applications", "applicationsets", "appprojects"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "sync"]
+
+---
+# ── Monitoring Role (Prometheus scraping) ─────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deepblue-monitoring
+  labels:
+    project: deepblue
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/proxy
+  - nodes/metrics
+  - services
+  - endpoints
+  - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions", "networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+  verbs: ["get"]
+
+---
+# ── Namespace-scoped Role: Research Lead ──────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: research-lead
+  namespace: deepblue-research
+  labels:
+    project: deepblue
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "pods/exec", "services", "configmaps", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+
+---
+# ── Namespace-scoped Role: Scientist ─────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scientist
+  namespace: deepblue-research
+  labels:
+    project: deepblue
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+  resourceNames: []
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create"]
+
+---
+# ── ClusterRoleBinding: Platform Admin Team ───────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deepblue-platform-admins
+  labels:
+    project: deepblue
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: deepblue-platform-admin
+subjects:
+- kind: Group
+  name: deepblue-platform-team
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── ClusterRoleBinding: ArgoCD Service Account ───────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deepblue-argocd-deployer
+  labels:
+    project: deepblue
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: deepblue-cicd-deployer
+subjects:
+- kind: ServiceAccount
+  name: argocd-application-controller
+  namespace: deepblue-cicd
+
+---
+# ── ClusterRoleBinding: Prometheus ───────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deepblue-prometheus-monitoring
+  labels:
+    project: deepblue
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: deepblue-monitoring
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: deepblue-monitoring
+
+---
+# ── ClusterRoleBinding: Readonly Auditors ─────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deepblue-readonly-auditors
+  labels:
+    project: deepblue
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: deepblue-readonly-auditor
+subjects:
+- kind: Group
+  name: deepblue-audit-team
+  apiGroup: rbac.authorization.k8s.io
+- kind: Group
+  name: deepblue-compliance-team
+  apiGroup: rbac.authorization.k8s.io

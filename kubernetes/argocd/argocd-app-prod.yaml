@@ -1,0 +1,201 @@
+################################################################################
+# DeepBlue – ArgoCD Application Definitions
+# GitOps-managed deployments for all production services
+################################################################################
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: deepblue
+  namespace: deepblue-cicd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: DeepBlue Oceanographic Platform – All Environments
+  sourceRepos:
+  - "https://github.com/deepblue-research/deepblue-gitops"
+  - "https://charts.helm.sh/stable"
+  - "oci://public.ecr.aws/deepblue"
+
+  destinations:
+  - namespace: deepblue-ingestion
+    server: https://kubernetes.default.svc
+  - namespace: deepblue-processing
+    server: https://kubernetes.default.svc
+  - namespace: deepblue-api
+    server: https://kubernetes.default.svc
+  - namespace: deepblue-research
+    server: https://kubernetes.default.svc
+  - namespace: deepblue-monitoring
+    server: https://kubernetes.default.svc
+  - namespace: deepblue-security
+    server: https://kubernetes.default.svc
+  - namespace: deepblue-infra
+    server: https://kubernetes.default.svc
+
+  clusterResourceWhitelist:
+  - group: ''
+    kind: Namespace
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRole
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRoleBinding
+  - group: networking.k8s.io
+    kind: IngressClass
+  - group: apiextensions.k8s.io
+    kind: CustomResourceDefinition
+
+  namespaceResourceBlacklist:
+  - group: ''
+    kind: ResourceQuota
+  - group: ''
+    kind: LimitRange
+
+  roles:
+  - name: deployer
+    description: CI/CD deployer – can sync applications
+    policies:
+    - p, proj:deepblue:deployer, applications, sync, deepblue/*, allow
+    - p, proj:deepblue:deployer, applications, get, deepblue/*, allow
+    groups:
+    - deepblue-deployers
+
+  - name: read-only
+    description: Read-only access for audit
+    policies:
+    - p, proj:deepblue:read-only, applications, get, deepblue/*, allow
+    groups:
+    - deepblue-auditors
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deepblue-ingestion-prod
+  namespace: deepblue-cicd
+  labels:
+    project: deepblue
+    environment: prod
+    component: ingestion
+  annotations:
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: deployments
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: deployments
+    notifications.argoproj.io/subscribe.on-health-degraded.pagerduty: ""
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: deepblue
+  source:
+    repoURL: https://github.com/deepblue-research/deepblue-gitops
+    targetRevision: HEAD
+    path: apps/ingestion-service/prod
+    helm:
+      valueFiles:
+      - values.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: deepblue-ingestion
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+    - Validate=true
+    - CreateNamespace=false
+    - PrunePropagationPolicy=foreground
+    - PruneLast=true
+    - RespectIgnoreDifferences=true
+    - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  revisionHistoryLimit: 10
+
+  ignoreDifferences:
+  - group: apps
+    kind: Deployment
+    jsonPointers:
+    - /spec/replicas
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deepblue-api-prod
+  namespace: deepblue-cicd
+  labels:
+    project: deepblue
+    environment: prod
+    component: api
+  annotations:
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: deployments
+    notifications.argoproj.io/subscribe.on-health-degraded.pagerduty: ""
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: deepblue
+  source:
+    repoURL: https://github.com/deepblue-research/deepblue-gitops
+    targetRevision: HEAD
+    path: apps/api-service/prod
+    helm:
+      valueFiles:
+      - values.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: deepblue-api
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - Validate=true
+    - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: deepblue-monitoring-prod
+  namespace: deepblue-cicd
+  labels:
+    project: deepblue
+    environment: prod
+    component: monitoring
+spec:
+  project: deepblue
+  source:
+    repoURL: https://github.com/deepblue-research/deepblue-gitops
+    targetRevision: HEAD
+    path: apps/monitoring/prod
+    helm:
+      valueFiles:
+      - values.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: deepblue-monitoring
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - Validate=true
+    - ServerSideApply=true

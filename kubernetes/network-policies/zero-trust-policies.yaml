@@ -1,0 +1,252 @@
+################################################################################
+# DeepBlue – Zero-Trust Network Policies
+# Implements default-deny and explicit allow rules for all namespaces
+################################################################################
+
+# ─────────────────────────────────────────
+# DEFAULT DENY ALL – Applied to every namespace
+# ─────────────────────────────────────────
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: deepblue-ingestion
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: deepblue-processing
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: deepblue-api
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: deepblue-research
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+# ─────────────────────────────────────────
+# ALLOW DNS for all pods (required for service resolution)
+# ─────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: deepblue-ingestion
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: deepblue-processing
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: deepblue-api
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+# ─────────────────────────────────────────
+# INGESTION SERVICE – Network Policy
+# ─────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingestion-service-policy
+  namespace: deepblue-ingestion
+spec:
+  podSelector:
+    matchLabels:
+      app: ingestion-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from ingress-nginx (ALB → ingress controller)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: deepblue-infra
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  # Allow Prometheus scraping
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: deepblue-monitoring
+      podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  # Allow to MSK Kafka (port 9092 + 9094 TLS)
+  - ports:
+    - protocol: TCP
+      port: 9092
+    - protocol: TCP
+      port: 9094
+  # Allow to RDS PostgreSQL
+  - ports:
+    - protocol: TCP
+      port: 5432
+  # Allow to Vault
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: deepblue-security
+      podSelector:
+        matchLabels:
+          app: vault
+    ports:
+    - protocol: TCP
+      port: 8200
+  # Allow HTTPS to AWS services (S3, IoT Core via VPC endpoints)
+  - ports:
+    - protocol: TCP
+      port: 443
+
+# ─────────────────────────────────────────
+# API SERVICE – Network Policy
+# ─────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-service-policy
+  namespace: deepblue-api
+spec:
+  podSelector:
+    matchLabels:
+      app: api-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: deepblue-infra
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: deepblue-monitoring
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - ports:
+    - protocol: TCP
+      port: 5432   # PostgreSQL
+    - protocol: TCP
+      port: 6379   # Redis
+    - protocol: TCP
+      port: 9200   # OpenSearch
+    - protocol: TCP
+      port: 8200   # Vault
+    - protocol: TCP
+      port: 443    # AWS services
+
+# ─────────────────────────────────────────
+# MONITORING – Allow Prometheus to scrape all namespaces
+# ─────────────────────────────────────────
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: deepblue-ingestion
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: deepblue-monitoring
+      podSelector:
+        matchLabels:
+          app: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+    - protocol: TCP
+      port: 9091
+    - protocol: TCP
+      port: 8080

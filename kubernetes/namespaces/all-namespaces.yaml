@@ -1,0 +1,170 @@
+################################################################################
+# DeepBlue – Kubernetes Namespace Definitions
+# All platform namespaces with resource quotas, limit ranges, and labels
+################################################################################
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepblue-ingestion
+  labels:
+    project: deepblue
+    team: data-engineering
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ingestion-quota
+  namespace: deepblue-ingestion
+spec:
+  hard:
+    requests.cpu: "40"
+    requests.memory: 80Gi
+    limits.cpu: "80"
+    limits.memory: 160Gi
+    pods: "200"
+    services: "20"
+    persistentvolumeclaims: "50"
+    count/deployments.apps: "20"
+    count/services: "20"
+
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: ingestion-limits
+  namespace: deepblue-ingestion
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: 500m
+      memory: 512Mi
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi
+    max:
+      cpu: "8"
+      memory: 16Gi
+    min:
+      cpu: 50m
+      memory: 64Mi
+  - type: Pod
+    max:
+      cpu: "16"
+      memory: 32Gi
+  - type: PersistentVolumeClaim
+    max:
+      storage: 500Gi
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepblue-processing
+  labels:
+    project: deepblue
+    team: data-engineering
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: processing-quota
+  namespace: deepblue-processing
+spec:
+  hard:
+    requests.cpu: "60"
+    requests.memory: 240Gi
+    limits.cpu: "120"
+    limits.memory: 480Gi
+    pods: "100"
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepblue-api
+  labels:
+    project: deepblue
+    team: backend-engineering
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: api-quota
+  namespace: deepblue-api
+spec:
+  hard:
+    requests.cpu: "30"
+    requests.memory: 30Gi
+    limits.cpu: "60"
+    limits.memory: 60Gi
+    pods: "150"
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepblue-research
+  labels:
+    project: deepblue
+    team: research
+    environment: production
+    pod-security.kubernetes.io/enforce: baseline
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepblue-monitoring
+  labels:
+    project: deepblue
+    team: platform-sre
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepblue-cicd
+  labels:
+    project: deepblue
+    team: platform
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepblue-security
+  labels:
+    project: deepblue
+    team: security
+    environment: production
+    pod-security.kubernetes.io/enforce: restricted
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: deepblue-infra
+  labels:
+    project: deepblue
+    team: platform
+    environment: production
+    pod-security.kubernetes.io/enforce: privileged

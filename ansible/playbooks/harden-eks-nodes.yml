@@ -1,0 +1,313 @@
+################################################################################
+# DeepBlue – EKS Node OS Hardening Playbook
+# Applies CIS Amazon Linux 2 Level 1 benchmark to all EKS worker nodes
+################################################################################
+---
+- name: Harden EKS Worker Nodes – CIS AL2 Benchmark
+  hosts: eks_nodes
+  become: yes
+  gather_facts: yes
+  vars:
+    cis_level: 1
+    disable_ipv6: true
+    auditd_max_log_file: 50
+    auditd_space_left_action: email
+
+  pre_tasks:
+  - name: Verify target is Amazon Linux 2
+    assert:
+      that:
+        - ansible_distribution == "Amazon"
+        - ansible_distribution_major_version == "2"
+      fail_msg: "This playbook is intended for Amazon Linux 2 only."
+
+  - name: Update all packages to latest security patches
+    yum:
+      name: '*'
+      state: latest
+      security: yes
+    notify: restart_services
+
+  tasks:
+
+  # ── CIS 1.1 – Filesystem Configuration ─────────────────────────────────────
+  - name: Ensure /tmp is configured as separate partition or tmpfs
+    mount:
+      path: /tmp
+      src: tmpfs
+      fstype: tmpfs
+      opts: "defaults,nodev,nosuid,noexec"
+      state: mounted
+
+  - name: Ensure nodev option on /tmp
+    mount:
+      path: /tmp
+      opts: "defaults,nodev,nosuid,noexec"
+      state: remounted
+
+  - name: Disable unused filesystems
+    kernel_blacklist:
+      name: "{{ item }}"
+      state: present
+    loop:
+      - cramfs
+      - freevxfs
+      - jffs2
+      - hfs
+      - hfsplus
+      - squashfs
+      - udf
+      - usb-storage
+
+  # ── CIS 1.3 – Filesystem Integrity Checking ─────────────────────────────────
+  - name: Install AIDE for file integrity monitoring
+    yum:
+      name: aide
+      state: present
+
+  - name: Initialize AIDE database
+    command: /usr/sbin/aide --init
+    args:
+      creates: /var/lib/aide/aide.db.new.gz
+    register: aide_init
+
+  - name: Move AIDE database to active location
+    command: mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+    when: aide_init.changed
+
+  - name: Configure AIDE daily check cron job
+    cron:
+      name: aide_daily_check
+      minute: "5"
+      hour: "0"
+      job: "/usr/sbin/aide --check 2>&1 | /usr/bin/logger -t aide"
+      user: root
+
+  # ── CIS 2.1 – Disable Unnecessary Services ─────────────────────────────────
+  - name: Ensure unnecessary services are stopped and disabled
+    systemd:
+      name: "{{ item }}"
+      state: stopped
+      enabled: false
+      masked: true
+    loop:
+      - avahi-daemon
+      - cups
+      - dhcpd
+      - slapd
+      - nfs
+      - rpcbind
+      - named
+      - vsftpd
+      - httpd
+      - dovecot
+      - smb
+      - squid
+      - snmpd
+      - ypserv
+      - rsh.socket
+      - rlogin.socket
+      - rexec.socket
+      - telnet.socket
+    ignore_errors: yes
+
+  # ── CIS 3.1 – Network Parameters ─────────────────────────────────────────
+  - name: Configure kernel network parameters (CIS 3.1 and 3.2)
+    sysctl:
+      name: "{{ item.name }}"
+      value: "{{ item.value }}"
+      state: present
+      reload: yes
+      sysctl_file: /etc/sysctl.d/99-deepblue-cis.conf
+    loop:
+      - { name: net.ipv4.ip_forward,                       value: "1" }
+      - { name: net.ipv4.conf.all.send_redirects,          value: "0" }
+      - { name: net.ipv4.conf.default.send_redirects,      value: "0" }
+      - { name: net.ipv4.conf.all.accept_redirects,        value: "0" }
+      - { name: net.ipv4.conf.default.accept_redirects,    value: "0" }
+      - { name: net.ipv4.conf.all.secure_redirects,        value: "0" }
+      - { name: net.ipv4.conf.default.secure_redirects,    value: "0" }
+      - { name: net.ipv4.conf.all.log_martians,            value: "1" }
+      - { name: net.ipv4.conf.default.log_martians,        value: "1" }
+      - { name: net.ipv4.conf.all.accept_source_route,     value: "0" }
+      - { name: net.ipv4.icmp_echo_ignore_broadcasts,      value: "1" }
+      - { name: net.ipv4.icmp_ignore_bogus_error_responses,value: "1" }
+      - { name: net.ipv4.tcp_syncookies,                   value: "1" }
+      - { name: net.ipv6.conf.all.accept_ra,               value: "0" }
+      - { name: net.ipv6.conf.default.accept_ra,           value: "0" }
+      - { name: net.ipv6.conf.all.accept_redirects,        value: "0" }
+      - { name: kernel.randomize_va_space,                 value: "2" }
+      - { name: fs.suid_dumpable,                          value: "0" }
+      - { name: kernel.core_uses_pid,                      value: "1" }
+
+  # ── CIS 4 – Logging and Auditing ───────────────────────────────────────────
+  - name: Install auditd
+    yum:
+      name: audit
+      state: present
+
+  - name: Configure auditd
+    template:
+      src: templates/auditd.conf.j2
+      dest: /etc/audit/auditd.conf
+      mode: '0640'
+    notify: restart_auditd
+
+  - name: Configure audit rules
+    copy:
+      dest: /etc/audit/rules.d/99-deepblue.rules
+      content: |
+        # Delete all existing rules
+        -D
+        # Increase buffer size
+        -b 8192
+        # Failure mode: 1=print, 2=panic
+        -f 1
+
+        # Monitor sudoers changes
+        -w /etc/sudoers -p wa -k sudoers_changes
+        -w /etc/sudoers.d/ -p wa -k sudoers_changes
+
+        # Monitor user/group file changes
+        -w /etc/passwd -p wa -k identity
+        -w /etc/group -p wa -k identity
+        -w /etc/shadow -p wa -k identity
+
+        # Monitor privileged command execution
+        -a always,exit -F arch=b64 -S execve -F euid=0 -k privileged
+        -a always,exit -F arch=b32 -S execve -F euid=0 -k privileged
+
+        # Monitor network changes
+        -a always,exit -F arch=b64 -S sethostname -S setdomainname -k system_locale
+        -w /etc/hosts -p wa -k system_locale
+        -w /etc/issue -p wa -k system_locale
+
+        # Monitor Docker/containerd socket
+        -w /var/run/docker.sock -p wa -k container_runtime
+        -w /run/containerd/containerd.sock -p wa -k container_runtime
+
+        # Monitor SSH configuration
+        -w /etc/ssh/sshd_config -p wa -k sshd_config
+
+        # Kubernetes audit
+        -w /var/lib/kubelet/ -p wa -k kubelet_config
+        -w /etc/kubernetes/ -p wa -k kubernetes_config
+      mode: '0640'
+    notify: reload_auditd
+
+  - name: Enable and start auditd
+    systemd:
+      name: auditd
+      state: started
+      enabled: yes
+
+  # ── CIS 5 – Access, Authentication and Authorization ──────────────────────
+  - name: Configure SSH to disable root login and password auth
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+      validate: /usr/sbin/sshd -t -f %s
+    loop:
+      - { regexp: '^#?PermitRootLogin',      line: 'PermitRootLogin no' }
+      - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+      - { regexp: '^#?X11Forwarding',        line: 'X11Forwarding no' }
+      - { regexp: '^#?MaxAuthTries',         line: 'MaxAuthTries 4' }
+      - { regexp: '^#?PermitEmptyPasswords', line: 'PermitEmptyPasswords no' }
+      - { regexp: '^#?ClientAliveInterval',  line: 'ClientAliveInterval 300' }
+      - { regexp: '^#?ClientAliveCountMax',  line: 'ClientAliveCountMax 0' }
+      - { regexp: '^#?LoginGraceTime',       line: 'LoginGraceTime 60' }
+      - { regexp: '^#?Banner',               line: 'Banner /etc/issue.net' }
+      - { regexp: '^#?Protocol',             line: 'Protocol 2' }
+    notify: restart_sshd
+
+  - name: Set warning banner
+    copy:
+      dest: /etc/issue.net
+      content: |
+        ╔══════════════════════════════════════════════════════════════════╗
+        ║    AUTHORIZED ACCESS ONLY – DeepBlue Research Institute          ║
+        ║    This system is monitored. Unauthorized access is prohibited.  ║
+        ║    All activity is logged and subject to audit.                  ║
+        ╚══════════════════════════════════════════════════════════════════╝
+      mode: '0644'
+
+  # ── CIS 6 – System Maintenance ─────────────────────────────────────────────
+  - name: Install security tools
+    yum:
+      name:
+        - fail2ban
+        - rkhunter
+        - chkrootkit
+        - lynis
+      state: present
+
+  - name: Configure fail2ban for SSH
+    copy:
+      dest: /etc/fail2ban/jail.local
+      content: |
+        [DEFAULT]
+        bantime  = 3600
+        findtime = 600
+        maxretry = 5
+        banaction = iptables-multiport
+
+        [sshd]
+        enabled  = true
+        port     = ssh
+        logpath  = %(sshd_log)s
+        backend  = %(sshd_backend)s
+        maxretry = 3
+    notify: restart_fail2ban
+
+  - name: Enable and start fail2ban
+    systemd:
+      name: fail2ban
+      state: started
+      enabled: yes
+
+  # ── Install monitoring agents ──────────────────────────────────────────────
+  - name: Install and configure Node Exporter
+    include_role:
+      name: node-exporter
+
+  - name: Install and configure Fluent Bit
+    include_role:
+      name: fluent-bit
+
+  # ── Final compliance check ──────────────────────────────────────────────────
+  - name: Run Lynis security audit
+    command: lynis audit system --quiet --cronjob
+    register: lynis_result
+    changed_when: false
+    ignore_errors: yes
+
+  - name: Save Lynis audit report
+    copy:
+      content: "{{ lynis_result.stdout }}"
+      dest: /var/log/lynis-audit-{{ ansible_date_time.date }}.log
+      mode: '0600'
+    when: lynis_result.stdout is defined
+
+  handlers:
+  - name: restart_sshd
+    systemd:
+      name: sshd
+      state: restarted
+
+  - name: restart_auditd
+    systemd:
+      name: auditd
+      state: restarted
+
+  - name: reload_auditd
+    command: augenrules --load
+
+  - name: restart_fail2ban
+    systemd:
+      name: fail2ban
+      state: restarted
+
+  - name: restart_services
+    debug:
+      msg: "Package updates applied. Review if node reboot is required."

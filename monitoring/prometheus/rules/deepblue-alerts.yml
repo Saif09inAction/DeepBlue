@@ -1,0 +1,253 @@
+################################################################################
+# DeepBlue – Prometheus Alert Rules
+# Production alerting rules for all platform components
+################################################################################
+
+groups:
+
+  # ── Data Ingestion Alerts ──────────────────────────────────────────────────
+  - name: deepblue.ingestion
+    interval: 30s
+    rules:
+
+    - alert: KafkaConsumerLagCritical
+      expr: |
+        sum(kafka_consumer_group_lag{
+          job="kafka-exporter",
+          topic="raw-sensor-data"
+        }) by (consumer_group) > 100000
+      for: 5m
+      labels:
+        severity: critical
+        team: data-engineering
+        tier: "1"
+        runbook: "https://wiki.deepblue.org/runbooks/kafka-consumer-lag"
+      annotations:
+        summary: "Kafka consumer lag critical on {{ $labels.consumer_group }}"
+        description: |
+          Consumer group {{ $labels.consumer_group }} has a lag of {{ $value | humanize }}
+          messages on topic raw-sensor-data. This may indicate an ingestion bottleneck.
+          Current value: {{ $value }} messages.
+
+    - alert: KafkaConsumerLagHigh
+      expr: |
+        sum(kafka_consumer_group_lag{
+          job="kafka-exporter",
+          topic="raw-sensor-data"
+        }) by (consumer_group) > 10000
+      for: 10m
+      labels:
+        severity: warning
+        team: data-engineering
+        tier: "2"
+      annotations:
+        summary: "Kafka consumer lag elevated on {{ $labels.consumer_group }}"
+        description: "Consumer lag is {{ $value | humanize }} messages. Consider scaling ingestion pods."
+
+    - alert: IngestionServiceDown
+      expr: up{job="deepblue-ingestion"} == 0
+      for: 2m
+      labels:
+        severity: critical
+        team: data-engineering
+        tier: "1"
+        runbook: "https://wiki.deepblue.org/runbooks/ingestion-service-down"
+      annotations:
+        summary: "Ingestion service is down on {{ $labels.pod }}"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been down for 2 minutes."
+
+    - alert: SensorDataFreshnessStale
+      expr: |
+        (time() - max(deepblue_sensor_last_received_timestamp_seconds) by (sensor_type)) > 600
+      for: 5m
+      labels:
+        severity: warning
+        team: data-engineering
+      annotations:
+        summary: "Sensor data stale for {{ $labels.sensor_type }}"
+        description: "No data received from {{ $labels.sensor_type }} sensors in {{ $value | humanizeDuration }}."
+
+  # ── API Service Alerts ─────────────────────────────────────────────────────
+  - name: deepblue.api
+    interval: 30s
+    rules:
+
+    - alert: APIHighErrorRate
+      expr: |
+        (
+          sum(rate(http_requests_total{
+            job="deepblue-api",
+            status=~"5.."
+          }[5m])) by (service)
+          /
+          sum(rate(http_requests_total{
+            job="deepblue-api"
+          }[5m])) by (service)
+        ) > 0.05
+      for: 3m
+      labels:
+        severity: critical
+        team: backend-engineering
+        tier: "1"
+        runbook: "https://wiki.deepblue.org/runbooks/api-high-error-rate"
+      annotations:
+        summary: "API error rate > 5% for {{ $labels.service }}"
+        description: "Service {{ $labels.service }} has a {{ $value | humanizePercentage }} error rate over the last 5 minutes."
+
+    - alert: APIHighLatencyP99
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(http_request_duration_seconds_bucket{
+            job="deepblue-api"
+          }[5m])) by (le, endpoint)
+        ) > 0.5
+      for: 5m
+      labels:
+        severity: critical
+        team: backend-engineering
+        tier: "1"
+      annotations:
+        summary: "API P99 latency > 500ms on {{ $labels.endpoint }}"
+        description: "Endpoint {{ $labels.endpoint }} P99 latency is {{ $value | humanizeDuration }}."
+
+    - alert: APIServiceUnavailable
+      expr: |
+        sum(kube_deployment_status_replicas_available{
+          namespace="deepblue-api",
+          deployment="api-service"
+        }) == 0
+      for: 1m
+      labels:
+        severity: critical
+        team: platform
+        tier: "0"
+        page: "true"
+      annotations:
+        summary: "API service has zero available replicas"
+        description: "All API service pods are unavailable. CRITICAL SERVICE IMPACT."
+
+  # ── Infrastructure Alerts ──────────────────────────────────────────────────
+  - name: deepblue.infrastructure
+    interval: 60s
+    rules:
+
+    - alert: NodeDiskPressureHigh
+      expr: |
+        (
+          node_filesystem_size_bytes{fstype!~"tmpfs|overlay", mountpoint="/"}
+          - node_filesystem_free_bytes{fstype!~"tmpfs|overlay", mountpoint="/"}
+        ) / node_filesystem_size_bytes{fstype!~"tmpfs|overlay", mountpoint="/"} > 0.85
+      for: 5m
+      labels:
+        severity: warning
+        team: platform
+      annotations:
+        summary: "Node {{ $labels.node }} disk usage above 85%"
+        description: "Disk usage on {{ $labels.node }} ({{ $labels.mountpoint }}) is {{ $value | humanizePercentage }}."
+
+    - alert: NodeMemoryPressureHigh
+      expr: |
+        (
+          node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes
+        ) / node_memory_MemTotal_bytes > 0.90
+      for: 5m
+      labels:
+        severity: warning
+        team: platform
+      annotations:
+        summary: "Node {{ $labels.node }} memory above 90%"
+        description: "Memory usage on {{ $labels.node }} is {{ $value | humanizePercentage }}."
+
+    - alert: PodCrashLooping
+      expr: |
+        rate(kube_pod_container_status_restarts_total[15m]) * 60 * 15 > 3
+      for: 5m
+      labels:
+        severity: warning
+        team: platform
+      annotations:
+        summary: "Pod {{ $labels.pod }} is crash looping"
+        description: "Container {{ $labels.container }} in pod {{ $labels.pod }} (namespace {{ $labels.namespace }}) has restarted {{ $value | humanize }} times in 15 minutes."
+
+    - alert: PersistentVolumeClaimPending
+      expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+      for: 10m
+      labels:
+        severity: warning
+        team: platform
+      annotations:
+        summary: "PVC {{ $labels.persistentvolumeclaim }} pending in {{ $labels.namespace }}"
+        description: "PersistentVolumeClaim {{ $labels.persistentvolumeclaim }} has been in Pending state for 10 minutes."
+
+  # ── Database Alerts ────────────────────────────────────────────────────────
+  - name: deepblue.database
+    interval: 60s
+    rules:
+
+    - alert: PostgreSQLHighConnections
+      expr: |
+        (
+          pg_stat_activity_count{datname="deepblue"}
+          / pg_settings_max_connections
+        ) > 0.80
+      for: 5m
+      labels:
+        severity: warning
+        team: data-engineering
+      annotations:
+        summary: "PostgreSQL connections above 80%"
+        description: "{{ $value | humanizePercentage }} of max connections are in use."
+
+    - alert: PostgreSQLReplicationLagHigh
+      expr: pg_replication_lag > 300
+      for: 5m
+      labels:
+        severity: critical
+        team: data-engineering
+        tier: "1"
+      annotations:
+        summary: "PostgreSQL replication lag > 5 minutes"
+        description: "Replication lag is {{ $value | humanizeDuration }}. DR data may be stale."
+
+  # ── Security Alerts ────────────────────────────────────────────────────────
+  - name: deepblue.security
+    interval: 30s
+    rules:
+
+    - alert: TLSCertificateExpiringSoon
+      expr: |
+        (x509_cert_expiry - time()) / 86400 < 14
+      for: 1h
+      labels:
+        severity: warning
+        team: security
+      annotations:
+        summary: "TLS certificate expiring in {{ $value | humanize }} days"
+        description: "Certificate for {{ $labels.subject_common_name }} expires in less than 14 days."
+
+    - alert: FalcoAlertRateHigh
+      expr: |
+        rate(falco_events_total{priority=~"Critical|Emergency"}[5m]) > 0.1
+      for: 2m
+      labels:
+        severity: critical
+        team: security
+        tier: "1"
+        page: "true"
+      annotations:
+        summary: "High rate of critical Falco security events"
+        description: "Falco is generating {{ $value | humanize }} critical security events per second. Possible intrusion."
+
+    - alert: UnauthorizedAPIAccess
+      expr: |
+        rate(apiserver_audit_event_total{
+          verb=~"create|update|delete|patch",
+          user!~"system:.*|deepblue-cicd|argocd-application-controller"
+        }[5m]) > 10
+      for: 3m
+      labels:
+        severity: warning
+        team: security
+      annotations:
+        summary: "Unusual API write activity detected"
+        description: "Elevated API write events from non-system accounts. Possible unauthorized access."

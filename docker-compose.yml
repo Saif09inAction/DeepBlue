@@ -1,6 +1,20 @@
 ################################################################################
-# DeepBlue – Local Development Environment
-# Mirrors the production microservice topology for developer workflows
+# DeepBlue — Docker Compose
+#
+# QUICK START (recommended for demo/presentation):
+#   docker compose --profile demo up -d
+#   Open: http://localhost:5173  (dashboard)
+#         http://localhost:8000/docs  (API)
+#         http://localhost:3000  (Grafana)
+#         http://localhost:9090  (Prometheus)
+#
+# FULL STACK (all infrastructure — needs 8 GB RAM):
+#   docker compose --profile full up -d
+#   Adds: Kafka, Redis, Elasticsearch, Logstash, Kibana, Vault
+#
+# STOP:
+#   docker compose --profile demo down
+#   docker compose --profile full down -v   # also removes volumes
 ################################################################################
 
 version: "3.9"
@@ -11,8 +25,8 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
-x-healthcheck-defaults: &healthcheck-defaults
-  interval: 30s
+x-healthcheck: &hc
+  interval: 20s
   timeout: 10s
   retries: 5
   start_period: 30s
@@ -20,31 +34,126 @@ x-healthcheck-defaults: &healthcheck-defaults
 networks:
   deepblue-net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
 
 volumes:
+  prometheus_data:
+  grafana_data:
   postgres_data:
+  redis_data:
   kafka_data:
   zookeeper_data:
-  redis_data:
-  opensearch_data:
-  grafana_data:
-  prometheus_data:
-  vault_data:
   elasticsearch_data:
-  logstash_data:
   kibana_data:
+  vault_data:
 
 services:
 
-  # ─────────────────────────────────────────
-  # Infrastructure: PostgreSQL + TimescaleDB
-  # ─────────────────────────────────────────
+  # ══════════════════════════════════════════════════════════
+  # PROFILE: demo  — App + Monitoring only (fast startup)
+  # ══════════════════════════════════════════════════════════
+
+  # ── FastAPI Demo Backend ─────────────────────────────────
+  demo-api:
+    build:
+      context: ./demo
+      dockerfile: Dockerfile
+    image: deepblue/demo-api:latest
+    container_name: deepblue-api
+    profiles: [demo, full]
+    restart: unless-stopped
+    networks: [deepblue-net]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+    logging: *default-logging
+
+  # ── React Frontend (Nginx) ───────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: deepblue/frontend:latest
+    container_name: deepblue-frontend
+    profiles: [demo, full]
+    restart: unless-stopped
+    networks: [deepblue-net]
+    ports:
+      - "8080:80"
+    depends_on:
+      demo-api:
+        condition: service_healthy
+    environment:
+      - NGINX_HOST=localhost
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/"]
+    logging: *default-logging
+
+  # ── Prometheus ───────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: deepblue-prometheus
+    profiles: [demo, full]
+    restart: unless-stopped
+    networks: [deepblue-net]
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules/:/etc/prometheus/rules/:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+    logging: *default-logging
+
+  # ── Grafana ──────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: deepblue-grafana
+    profiles: [demo, full]
+    restart: unless-stopped
+    networks: [deepblue-net]
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: deepblue2026
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_DOMAIN: localhost
+      GF_INSTALL_PLUGINS: grafana-piechart-panel,grafana-worldmap-panel
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/datasources/:/etc/grafana/provisioning/datasources/:ro
+      - ./monitoring/grafana/provisioning/dashboards/:/etc/grafana/provisioning/dashboards/:ro
+      - ./monitoring/grafana/dashboards/:/etc/grafana/dashboards/:ro
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+    logging: *default-logging
+
+  # ══════════════════════════════════════════════════════════
+  # PROFILE: full  — Complete infrastructure stack
+  # ══════════════════════════════════════════════════════════
+
+  # ── PostgreSQL / TimescaleDB ─────────────────────────────
   postgres:
     image: timescale/timescaledb:latest-pg15
     container_name: deepblue-postgres
+    profiles: [full]
     restart: unless-stopped
     networks: [deepblue-net]
     ports:
@@ -52,22 +161,37 @@ services:
     environment:
       POSTGRES_DB: deepblue
       POSTGRES_USER: deepblue_admin
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev_pass_change_me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deepblue_local_dev}
       TIMESCALEDB_TELEMETRY: "off"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      <<: *healthcheck-defaults
+      <<: *hc
       test: ["CMD-SHELL", "pg_isready -U deepblue_admin -d deepblue"]
     logging: *default-logging
 
-  # ─────────────────────────────────────────
-  # Messaging: Zookeeper + Kafka
-  # ─────────────────────────────────────────
+  # ── Redis ────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: deepblue-redis
+    profiles: [full]
+    restart: unless-stopped
+    networks: [deepblue-net]
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "redis-cli", "ping"]
+    logging: *default-logging
+
+  # ── Zookeeper ────────────────────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     container_name: deepblue-zookeeper
+    profiles: [full]
     restart: unless-stopped
     networks: [deepblue-net]
     environment:
@@ -76,13 +200,15 @@ services:
     volumes:
       - zookeeper_data:/var/lib/zookeeper/data
     healthcheck:
-      <<: *healthcheck-defaults
+      <<: *hc
       test: ["CMD", "nc", "-z", "localhost", "2181"]
     logging: *default-logging
 
+  # ── Kafka ────────────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     container_name: deepblue-kafka
+    profiles: [full]
     restart: unless-stopped
     networks: [deepblue-net]
     ports:
@@ -93,24 +219,24 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_NUM_PARTITIONS: 12
-      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
       KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list"]
+      <<: *hc
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
     logging: *default-logging
 
+  # ── Kafka UI ─────────────────────────────────────────────
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: deepblue-kafka-ui
+    profiles: [full]
     restart: unless-stopped
     networks: [deepblue-net]
     ports:
@@ -123,132 +249,11 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
     logging: *default-logging
 
-  # ─────────────────────────────────────────
-  # Cache: Redis
-  # ─────────────────────────────────────────
-  redis:
-    image: redis:7.2-alpine
-    container_name: deepblue-redis
-    restart: unless-stopped
-    networks: [deepblue-net]
-    ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "redis-cli", "ping"]
-    logging: *default-logging
-
-  # ─────────────────────────────────────────
-  # Search: OpenSearch
-  # ─────────────────────────────────────────
-  opensearch:
-    image: opensearchproject/opensearch:2.13.0
-    container_name: deepblue-opensearch
-    restart: unless-stopped
-    networks: [deepblue-net]
-    ports:
-      - "9200:9200"
-      - "9600:9600"
-    environment:
-      discovery.type: single-node
-      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-      plugins.security.disabled: "true"
-      DISABLE_INSTALL_DEMO_CONFIG: "true"
-    volumes:
-      - opensearch_data:/usr/share/opensearch/data
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cat/health | grep -q green"]
-    logging: *default-logging
-
-  # ─────────────────────────────────────────
-  # Secrets: HashiCorp Vault (Dev Mode)
-  # ─────────────────────────────────────────
-  vault:
-    image: hashicorp/vault:1.16
-    container_name: deepblue-vault
-    restart: unless-stopped
-    networks: [deepblue-net]
-    ports:
-      - "8200:8200"
-    cap_add:
-      - IPC_LOCK
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: deepblue-dev-root-token
-      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-    command: server -dev
-    volumes:
-      - vault_data:/vault/data
-      - ./scripts/vault/init.sh:/vault/init.sh:ro
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL", "vault status -address=http://localhost:8200"]
-    logging: *default-logging
-
-  # ─────────────────────────────────────────
-  # Observability: Prometheus
-  # ─────────────────────────────────────────
-  prometheus:
-    image: prom/prometheus:v2.51.2
-    container_name: deepblue-prometheus
-    restart: unless-stopped
-    networks: [deepblue-net]
-    ports:
-      - "9091:9090"
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=15d
-      - --web.enable-lifecycle
-      - --web.enable-admin-api
-    volumes:
-      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/prometheus/rules/:/etc/prometheus/rules/:ro
-      - prometheus_data:/prometheus
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
-    logging: *default-logging
-
-  # ─────────────────────────────────────────
-  # Observability: Grafana
-  # ─────────────────────────────────────────
-  grafana:
-    image: grafana/grafana:10.4.2
-    container_name: deepblue-grafana
-    restart: unless-stopped
-    networks: [deepblue-net]
-    ports:
-      - "3000:3000"
-    depends_on:
-      prometheus:
-        condition: service_healthy
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-deepblue_grafana_dev}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_SERVER_DOMAIN: localhost
-      GF_INSTALL_PLUGINS: grafana-piechart-panel,grafana-worldmap-panel,grafana-clock-panel
-      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning/datasources/:/etc/grafana/provisioning/datasources/:ro
-      - ./monitoring/grafana/provisioning/dashboards/:/etc/grafana/provisioning/dashboards/:ro
-      - ./monitoring/grafana/dashboards/:/etc/grafana/dashboards/:ro
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health"]
-    logging: *default-logging
-
-  # ─────────────────────────────────────────
-  # Logging: ELK Stack
-  # ─────────────────────────────────────────
+  # ── Elasticsearch ────────────────────────────────────────
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
     container_name: deepblue-elasticsearch
+    profiles: [full]
     restart: unless-stopped
     networks: [deepblue-net]
     ports:
@@ -256,42 +261,20 @@ services:
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
-      - xpack.monitoring.templates.enabled=false
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
       - cluster.name=deepblue-logging
     volumes:
       - elasticsearch_data:/usr/share/elasticsearch/data
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\\|yellow\"'"]
+      <<: *hc
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
     logging: *default-logging
 
-  logstash:
-    image: docker.elastic.co/logstash/logstash:8.11.0
-    container_name: deepblue-logstash
-    restart: unless-stopped
-    networks: [deepblue-net]
-    ports:
-      - "5044:5044"
-      - "9600:9600"
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-    environment:
-      - "LS_JAVA_OPTS=-Xms256m -Xmx256m"
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
-    volumes:
-      - ./elk/logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
-      - ./elk/logstash/pipeline/deepblue.conf:/usr/share/logstash/pipeline/deepblue.conf:ro
-      - logstash_data:/usr/share/logstash/data
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL", "curl -s http://localhost:9600/_node/stats | grep -q uptime"]
-    logging: *default-logging
-
+  # ── Kibana ───────────────────────────────────────────────
   kibana:
     image: docker.elastic.co/kibana/kibana:8.11.0
     container_name: deepblue-kibana
+    profiles: [full]
     restart: unless-stopped
     networks: [deepblue-net]
     ports:
@@ -302,89 +285,32 @@ services:
     environment:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - SERVER_NAME=deepblue-kibana
-      - SERVER_PUBLICBASEURL=http://localhost:5601
       - XPACK_SECURITY_ENABLED=false
-      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=deepblue-kibana-32-char-dev-key!!
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=deepblue-kibana-enc-key-32chars!!
     volumes:
       - kibana_data:/usr/share/kibana/data
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"overall\"'"]
+      <<: *hc
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status | grep -q '\"overall\"'"]
     logging: *default-logging
 
-  # ─────────────────────────────────────────
-  # Application: Ingestion Service
-  # ─────────────────────────────────────────
-  ingestion-service:
-    build:
-      context: ./services/ingestion-service
-      dockerfile: ../../Dockerfiles/ingestion-service.Dockerfile
-      args:
-        BUILD_DATE: ${BUILD_DATE:-unknown}
-        VCS_REF: ${GIT_SHA:-unknown}
-        VERSION: ${VERSION:-dev}
-    image: deepblue/ingestion-service:dev
-    container_name: deepblue-ingestion
+  # ── Vault ────────────────────────────────────────────────
+  vault:
+    image: hashicorp/vault:1.15
+    container_name: deepblue-vault
+    profiles: [full]
     restart: unless-stopped
     networks: [deepblue-net]
     ports:
-      - "8081:8080"
-      - "9081:9090"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      vault:
-        condition: service_healthy
+      - "8200:8200"
     environment:
-      KAFKA_BROKERS: kafka:29092
-      KAFKA_TOPIC_RAW: raw-sensor-data
-      KAFKA_CONSUMER_GROUP: ingestion-consumer-group
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: deepblue
-      DB_USER: deepblue_admin
-      DB_PASSWORD: ${POSTGRES_PASSWORD:-localdev_pass_change_me}
-      VAULT_ADDR: http://vault:8200
-      VAULT_TOKEN: deepblue-dev-root-token
-      LOG_LEVEL: DEBUG
-      ENVIRONMENT: development
+      VAULT_DEV_ROOT_TOKEN_ID: deepblue-dev-root-token
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    command: vault server -dev
     healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health/live"]
-    logging: *default-logging
-
-  # ─────────────────────────────────────────
-  # Application: API Service
-  # ─────────────────────────────────────────
-  api-service:
-    build:
-      context: ./services/api-service
-      dockerfile: ../../Dockerfiles/api-service.Dockerfile
-    image: deepblue/api-service:dev
-    container_name: deepblue-api
-    restart: unless-stopped
-    networks: [deepblue-net]
-    ports:
-      - "8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_NAME: deepblue
-      DB_USER: deepblue_admin
-      DB_PASSWORD: ${POSTGRES_PASSWORD:-localdev_pass_change_me}
-      REDIS_URL: redis://redis:6379/0
-      OPENSEARCH_URL: http://opensearch:9200
-      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-in-prod}
-      ENVIRONMENT: development
-      LOG_LEVEL: DEBUG
-    healthcheck:
-      <<: *healthcheck-defaults
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      <<: *hc
+      test: ["CMD", "vault", "status"]
     logging: *default-logging

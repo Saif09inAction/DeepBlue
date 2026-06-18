@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { MapContainer, TileLayer, CircleMarker, Popup } from "react-leaflet";
 import { motion } from "framer-motion";
 import { Thermometer, Droplets, Gauge, Waves, Wind, FlaskConical, Filter } from "lucide-react";
@@ -77,9 +77,9 @@ export default function OceanMap() {
   const [selectedType,   setSelectedType]   = useState<string>("all");
   const [showVessels,    setShowVessels]    = useState(true);
   const [selectedSensor, setSelectedSensor] = useState<Sensor | null>(null);
-  const [stats, setStats] = useState({ online: 0, warning: 0, critical: 0 });
 
-  const { data: raw, loading: sensorsLoading } = useApi(() => api.sensors(200), { total: 0, sensors: [] }, 15_000);
+  // Fetch real sensors — limit capped at 100 (API max)
+  const { data: raw, loading: sensorsLoading } = useApi(() => api.sensors(100), { total: 0, sensors: [] }, 15_000);
   const sensors = (raw?.sensors ?? []).map(mapSensor);
 
   const types = ["all", ...Array.from(new Set(sensors.map(s => s.type)))];
@@ -89,13 +89,12 @@ export default function OceanMap() {
     (selectedType  === "all" || s.type       === selectedType)
   );
 
-  useEffect(() => {
-    setStats({
-      online:   filtered.filter(s => s.status === "online").length,
-      warning:  filtered.filter(s => s.status === "warning").length,
-      critical: filtered.filter(s => s.status === "critical").length,
-    });
-  }, [filtered]);
+  // Compute stats inline — no useState/useEffect needed, avoids infinite re-render
+  const stats = {
+    online:   filtered.filter(s => s.status === "online").length,
+    warning:  filtered.filter(s => s.status === "warning").length,
+    critical: filtered.filter(s => s.status === "critical").length,
+  };
 
   return (
     <div className="relative h-[calc(100vh-56px)] flex flex-col">

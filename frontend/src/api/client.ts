@@ -113,10 +113,10 @@ export interface APIInfraStatus {
 export const api = {
   health:      ()             => get<APIHealth>("/health"),
   overview:    ()             => get<APIOverview>("/api-root"),
-  sensors:     (limit = 100)  => get<{ total: number; sensors: APISensor[] }>(`/v1/sensors?limit=${limit}`),
+  sensors:     (limit = 100)  => get<{ total: number; sensors: APISensor[] }>(`/v1/sensors?limit=${Math.min(limit, 100)}`),
   sensor:      (id: string)   => get<APISensor>(`/v1/sensors/${id}`),
   oceanBasins: ()             => get<APIBasinSummary>("/v1/ocean-basins"),
-  alerts:      (limit = 50)   => get<APIAlertList>(`/v1/alerts?limit=${limit}`),
+  alerts:      (limit = 50)   => get<APIAlertList>(`/v1/alerts?limit=${Math.min(limit, 50)}`),
   alertStats:  ()             => get<{ total_alerts: number; critical: number; warning: number; by_basin: Record<string,number> }>("/v1/alerts/stats"),
   climate:     ()             => get<APIClimateSummary>("/v1/climate/summary"),
   ingestion:   (limit = 30)   => get<APIIngestionFeed>(`/v1/ingestion/feed?limit=${limit}`),

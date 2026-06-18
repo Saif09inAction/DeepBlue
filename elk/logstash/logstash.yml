@@ -1,0 +1,28 @@
+# ============================================================
+# DeepBlue — Logstash Configuration
+# Role: Collects, transforms, and routes logs to Elasticsearch
+# ============================================================
+
+node.name: deepblue-logstash
+http.host: 0.0.0.0
+http.port: 9600
+
+# ── Path Settings ────────────────────────────────────────────
+path.data: /usr/share/logstash/data
+path.logs: /var/log/logstash
+path.config: /usr/share/logstash/pipeline
+
+# ── Performance ──────────────────────────────────────────────
+pipeline.workers: 4
+pipeline.batch.size: 125
+pipeline.batch.delay: 50
+
+# ── Monitoring ───────────────────────────────────────────────
+xpack.monitoring.enabled: true
+xpack.monitoring.elasticsearch.hosts: ["https://elasticsearch:9200"]
+xpack.monitoring.elasticsearch.username: logstash_system
+xpack.monitoring.elasticsearch.password: "${LOGSTASH_SYSTEM_PASSWORD}"
+
+# ── Dead Letter Queue ────────────────────────────────────────
+dead_letter_queue.enable: true
+dead_letter_queue.max_bytes: 1024mb

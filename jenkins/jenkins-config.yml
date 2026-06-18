@@ -1,0 +1,114 @@
+# Jenkins Configuration as Code (JCasC)
+# Deploy with: helm install jenkins jenkins/jenkins -f jenkins-config.yml
+
+jenkins:
+  systemMessage: "DeepBlue CI/CD — Oceanographic Research Platform"
+  numExecutors: 0
+  mode: EXCLUSIVE
+
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+
+  authorizationStrategy:
+    roleBased:
+      roles:
+        global:
+          - name: "admin"
+            permissions:
+              - "Overall/Administer"
+            assignments:
+              - "admin"
+          - name: "developer"
+            permissions:
+              - "Overall/Read"
+              - "Job/Build"
+              - "Job/Read"
+            assignments:
+              - "developers"
+
+  clouds:
+    - kubernetes:
+        name: "kubernetes"
+        serverUrl: "https://kubernetes.default.svc"
+        namespace: "deepblue-cicd"
+        jenkinsUrl: "http://jenkins.deepblue-cicd.svc.cluster.local:8080"
+        jenkinsTunnel: "jenkins-agent.deepblue-cicd.svc.cluster.local:50000"
+        templates:
+          - name: "deepblue-builder"
+            namespace: "deepblue-cicd"
+            label: "deepblue-builder"
+            nodeUsageMode: EXCLUSIVE
+            containers:
+              - name: jnlp
+                image: "jenkins/inbound-agent:latest-jdk17"
+                resourceRequestCpu: "200m"
+                resourceRequestMemory: "256Mi"
+                resourceLimitCpu: "500m"
+                resourceLimitMemory: "512Mi"
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              id: "aws-ecr-credentials"
+              username: "${AWS_ACCESS_KEY_ID}"
+              password: "${AWS_SECRET_ACCESS_KEY}"
+              description: "AWS credentials for ECR"
+          - string:
+              id: "tf-state-bucket"
+              secret: "${TF_STATE_BUCKET}"
+              description: "Terraform state S3 bucket name"
+          - file:
+              id: "kubeconfig-prod"
+              fileName: "kubeconfig"
+              description: "EKS production kubeconfig"
+          - string:
+              id: "slack-webhook"
+              secret: "${SLACK_WEBHOOK_URL}"
+              description: "Slack webhook for build notifications"
+
+jobs:
+  - script: |
+      multibranchPipelineJob('deepblue-platform') {
+        branchSources {
+          github {
+            id('deepblue-github')
+            repoOwner('Saif09inAction')
+            repository('DeepBlue')
+            credentialsId('github-token')
+            traits {
+              gitHubBranchDiscovery { strategyId(1) }
+              gitHubPullRequestDiscovery { strategyId(1) }
+            }
+          }
+        }
+        factory {
+          workflowBranchProjectFactory {
+            scriptPath('jenkins/Jenkinsfile')
+          }
+        }
+        triggers {
+          periodic(5)
+        }
+      }
+
+unclassified:
+  slackNotifier:
+    teamDomain: "deepblue-devops"
+    tokenCredentialId: "slack-webhook"
+    room: "#deepblue-ci"
+
+  globalLibraries:
+    libraries:
+      - name: "deepblue-shared"
+        retriever:
+          modernSCM:
+            scm:
+              git:
+                remote: "https://github.com/Saif09inAction/DeepBlue.git"
+                credentialsId: "github-token"

@@ -1,0 +1,46 @@
+# ============================================================
+# DeepBlue — Kibana Configuration
+# Role: Log visualization and exploration UI
+# ============================================================
+
+server.name: deepblue-kibana
+server.host: 0.0.0.0
+server.port: 5601
+server.publicBaseUrl: "https://kibana.deepblue.oceanresearch.io"
+
+# ── Elasticsearch Connection ──────────────────────────────────
+elasticsearch.hosts: ["https://elasticsearch:9200"]
+elasticsearch.username: kibana_system
+elasticsearch.password: "${KIBANA_SYSTEM_PASSWORD}"
+elasticsearch.ssl.certificateAuthorities: ["/usr/share/kibana/config/certs/ca.crt"]
+elasticsearch.ssl.verificationMode: certificate
+
+# ── Security ─────────────────────────────────────────────────
+xpack.security.enabled: true
+xpack.security.encryptionKey: "${KIBANA_ENCRYPTION_KEY}"
+xpack.encryptedSavedObjects.encryptionKey: "${KIBANA_SAVED_OBJECTS_KEY}"
+xpack.reporting.encryptionKey: "${KIBANA_REPORTING_KEY}"
+
+# ── Fleet / APM ──────────────────────────────────────────────
+xpack.fleet.enabled: true
+xpack.apm.enabled: false
+
+# ── Monitoring ───────────────────────────────────────────────
+xpack.monitoring.enabled: true
+monitoring.ui.container.elasticsearch.enabled: true
+
+# ── Logging ──────────────────────────────────────────────────
+logging:
+  appenders:
+    file:
+      type: file
+      fileName: /var/log/kibana/kibana.log
+      layout:
+        type: json
+  root:
+    appenders: [default, file]
+    level: warn
+
+# ── UI Settings ──────────────────────────────────────────────
+kibana.defaultAppId: "dashboard"
+map.includeElasticMapsService: true

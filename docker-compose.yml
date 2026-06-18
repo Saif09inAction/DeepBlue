@@ -33,6 +33,9 @@ volumes:
   grafana_data:
   prometheus_data:
   vault_data:
+  elasticsearch_data:
+  logstash_data:
+  kibana_data:
 
 services:
 
@@ -229,13 +232,84 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SERVER_DOMAIN: localhost
       GF_INSTALL_PLUGINS: grafana-piechart-panel,grafana-worldmap-panel,grafana-clock-panel
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning/:/etc/grafana/provisioning/:ro
-      - ./monitoring/grafana/dashboards/:/var/lib/grafana/dashboards/:ro
+      - ./monitoring/grafana/provisioning/datasources/:/etc/grafana/provisioning/datasources/:ro
+      - ./monitoring/grafana/provisioning/dashboards/:/etc/grafana/provisioning/dashboards/:ro
+      - ./monitoring/grafana/dashboards/:/etc/grafana/dashboards/:ro
     healthcheck:
       <<: *healthcheck-defaults
       test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health"]
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Logging: ELK Stack
+  # ─────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: deepblue-elasticsearch
+    restart: unless-stopped
+    networks: [deepblue-net]
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.monitoring.templates.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.name=deepblue-logging
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\\|yellow\"'"]
+    logging: *default-logging
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: deepblue-logstash
+    restart: unless-stopped
+    networks: [deepblue-net]
+    ports:
+      - "5044:5044"
+      - "9600:9600"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - "LS_JAVA_OPTS=-Xms256m -Xmx256m"
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    volumes:
+      - ./elk/logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./elk/logstash/pipeline/deepblue.conf:/usr/share/logstash/pipeline/deepblue.conf:ro
+      - logstash_data:/usr/share/logstash/data
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "curl -s http://localhost:9600/_node/stats | grep -q uptime"]
+    logging: *default-logging
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: deepblue-kibana
+    restart: unless-stopped
+    networks: [deepblue-net]
+    ports:
+      - "5601:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=deepblue-kibana
+      - SERVER_PUBLICBASEURL=http://localhost:5601
+      - XPACK_SECURITY_ENABLED=false
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=deepblue-kibana-32-char-dev-key!!
+    volumes:
+      - kibana_data:/usr/share/kibana/data
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"overall\"'"]
     logging: *default-logging
 
   # ─────────────────────────────────────────

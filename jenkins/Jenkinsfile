@@ -1,0 +1,438 @@
+/*
+ * DeepBlue – Oceanographic Research & Climate Intelligence Platform
+ * Jenkins CI/CD Pipeline
+ *
+ * Stages:
+ *   1. Checkout          – Pull source code
+ *   2. Lint & Test       – ESLint, Pytest, type checks
+ *   3. Security Scan     – Trivy vulnerability scan on source
+ *   4. Build Images      – Docker multi-stage builds
+ *   5. Push to ECR       – Tag and push images to AWS ECR
+ *   6. Terraform Plan    – Preview infrastructure changes
+ *   7. Terraform Apply   – Apply infra (main branch only)
+ *   8. Deploy to EKS     – Rolling update via kubectl
+ *   9. Smoke Tests       – Health check endpoints post-deploy
+ *  10. Notify            – Slack notification on result
+ */
+
+pipeline {
+    agent {
+        kubernetes {
+            label 'deepblue-builder'
+            defaultContainer 'jnlp'
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-agent
+spec:
+  serviceAccountName: jenkins-sa
+  containers:
+  - name: docker
+    image: docker:24-dind
+    securityContext:
+      privileged: true
+    env:
+    - name: DOCKER_TLS_CERTDIR
+      value: ""
+  - name: node
+    image: node:20-alpine
+    command: [cat]
+    tty: true
+  - name: python
+    image: python:3.11-slim
+    command: [cat]
+    tty: true
+  - name: terraform
+    image: hashicorp/terraform:1.7
+    command: [cat]
+    tty: true
+  - name: kubectl
+    image: bitnami/kubectl:1.29
+    command: [cat]
+    tty: true
+  - name: trivy
+    image: aquasec/trivy:latest
+    command: [cat]
+    tty: true
+"""
+        }
+    }
+
+    environment {
+        AWS_REGION          = 'us-east-1'
+        ECR_REGISTRY        = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        ECR_REPO_API        = "${ECR_REGISTRY}/deepblue-api-service"
+        ECR_REPO_INGESTION  = "${ECR_REGISTRY}/deepblue-ingestion-service"
+        ECR_REPO_FRONTEND   = "${ECR_REGISTRY}/deepblue-frontend"
+        IMAGE_TAG           = "${env.GIT_COMMIT[0..7]}"
+        KUBECONFIG_SECRET   = 'kubeconfig-prod'
+        SLACK_CHANNEL       = '#deepblue-ci'
+        DEPLOY_NAMESPACE    = 'deepblue-api'
+        TERRAFORM_DIR       = 'terraform/environments/prod'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 45, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    stages {
+
+        // ── Stage 1: Checkout ─────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_AUTHOR     = sh(script: 'git log -1 --format="%an"', returnStdout: true).trim()
+                    env.GIT_MSG        = sh(script: 'git log -1 --format="%s"', returnStdout: true).trim()
+                    env.BRANCH_NAME_CLEAN = env.BRANCH_NAME.replaceAll('/', '-')
+                }
+                echo "Branch: ${env.BRANCH_NAME} | Commit: ${env.IMAGE_TAG} | Author: ${env.GIT_AUTHOR}"
+            }
+        }
+
+        // ── Stage 2: Lint & Test ──────────────────────────────────────────────
+        stage('Lint & Test') {
+            parallel {
+                stage('Frontend Lint') {
+                    steps {
+                        container('node') {
+                            dir('frontend') {
+                                sh '''
+                                    npm ci --prefer-offline
+                                    npm run lint
+                                    npx tsc --noEmit
+                                '''
+                            }
+                        }
+                    }
+                }
+                stage('Backend Tests') {
+                    steps {
+                        container('python') {
+                            dir('demo') {
+                                sh '''
+                                    pip install -r requirements.txt --quiet
+                                    python -m pytest tests/ -v --tb=short --junitxml=test-results.xml || true
+                                    python -m pylint main.py --disable=C,R --fail-under=7.0 || true
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true, testResults: 'demo/test-results.xml'
+                        }
+                    }
+                }
+                stage('Terraform Validate') {
+                    steps {
+                        container('terraform') {
+                            dir("${TERRAFORM_DIR}") {
+                                sh '''
+                                    terraform init -backend=false
+                                    terraform validate
+                                    terraform fmt -check -recursive
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Stage 3: Security Scan ────────────────────────────────────────────
+        stage('Security Scan') {
+            parallel {
+                stage('Trivy FS Scan') {
+                    steps {
+                        container('trivy') {
+                            sh '''
+                                trivy fs . \
+                                  --severity HIGH,CRITICAL \
+                                  --exit-code 0 \
+                                  --format table \
+                                  --output trivy-fs-report.txt
+                                cat trivy-fs-report.txt
+                            '''
+                        }
+                    }
+                    post {
+                        always {
+                            archiveArtifacts artifacts: 'trivy-fs-report.txt', allowEmptyArchive: true
+                        }
+                    }
+                }
+                stage('Secrets Detection') {
+                    steps {
+                        container('trivy') {
+                            sh '''
+                                trivy fs . \
+                                  --scanners secret \
+                                  --exit-code 1 \
+                                  --format table || echo "WARNING: Secrets detected – review before merging"
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Stage 4: Build Docker Images ──────────────────────────────────────
+        stage('Build Images') {
+            steps {
+                container('docker') {
+                    script {
+                        withCredentials([usernamePassword(
+                            credentialsId: 'aws-ecr-credentials',
+                            usernameVariable: 'AWS_ACCESS_KEY_ID',
+                            passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                        )]) {
+                            sh """
+                                # Authenticate to ECR
+                                aws ecr get-login-password --region ${AWS_REGION} | \
+                                  docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+                                # Build API service
+                                docker build -f Dockerfiles/api-service.Dockerfile \
+                                  -t ${ECR_REPO_API}:${IMAGE_TAG} \
+                                  -t ${ECR_REPO_API}:latest .
+
+                                # Build Ingestion service
+                                docker build -f Dockerfiles/ingestion-service.Dockerfile \
+                                  -t ${ECR_REPO_INGESTION}:${IMAGE_TAG} \
+                                  -t ${ECR_REPO_INGESTION}:latest .
+
+                                # Build Frontend
+                                docker build -f frontend/Dockerfile \
+                                  -t ${ECR_REPO_FRONTEND}:${IMAGE_TAG} \
+                                  -t ${ECR_REPO_FRONTEND}:latest ./frontend
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Stage 5: Image Security Scan ──────────────────────────────────────
+        stage('Scan Images') {
+            steps {
+                container('trivy') {
+                    sh """
+                        trivy image ${ECR_REPO_API}:${IMAGE_TAG} \
+                          --severity CRITICAL \
+                          --exit-code 0 \
+                          --format sarif \
+                          --output trivy-image-api.sarif
+
+                        trivy image ${ECR_REPO_INGESTION}:${IMAGE_TAG} \
+                          --severity CRITICAL \
+                          --exit-code 0 \
+                          --format sarif \
+                          --output trivy-image-ingestion.sarif
+                    """
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-image-*.sarif', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ── Stage 6: Push to ECR ──────────────────────────────────────────────
+        stage('Push to ECR') {
+            steps {
+                container('docker') {
+                    sh """
+                        docker push ${ECR_REPO_API}:${IMAGE_TAG}
+                        docker push ${ECR_REPO_API}:latest
+                        docker push ${ECR_REPO_INGESTION}:${IMAGE_TAG}
+                        docker push ${ECR_REPO_INGESTION}:latest
+                        docker push ${ECR_REPO_FRONTEND}:${IMAGE_TAG}
+                        docker push ${ECR_REPO_FRONTEND}:latest
+                    """
+                }
+            }
+        }
+
+        // ── Stage 7: Terraform Plan ───────────────────────────────────────────
+        stage('Terraform Plan') {
+            steps {
+                container('terraform') {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'aws-ecr-credentials',
+                            usernameVariable: 'AWS_ACCESS_KEY_ID',
+                            passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                        ),
+                        string(credentialsId: 'tf-state-bucket', variable: 'TF_STATE_BUCKET')
+                    ]) {
+                        dir("${TERRAFORM_DIR}") {
+                            sh """
+                                terraform init \
+                                  -backend-config="bucket=${TF_STATE_BUCKET}" \
+                                  -backend-config="region=${AWS_REGION}" \
+                                  -backend-config="key=deepblue/prod/terraform.tfstate"
+
+                                terraform plan \
+                                  -var="api_image=${ECR_REPO_API}:${IMAGE_TAG}" \
+                                  -var="ingestion_image=${ECR_REPO_INGESTION}:${IMAGE_TAG}" \
+                                  -out=tfplan
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Stage 8: Terraform Apply (main branch only) ───────────────────────
+        stage('Terraform Apply') {
+            when {
+                branch 'main'
+            }
+            steps {
+                container('terraform') {
+                    dir("${TERRAFORM_DIR}") {
+                        input message: "Apply Terraform plan to PRODUCTION?", ok: "Apply"
+                        sh 'terraform apply -auto-approve tfplan'
+                    }
+                }
+            }
+        }
+
+        // ── Stage 9: Deploy to EKS ────────────────────────────────────────────
+        stage('Deploy to EKS') {
+            when {
+                branch 'main'
+            }
+            steps {
+                container('kubectl') {
+                    withCredentials([file(credentialsId: "${KUBECONFIG_SECRET}", variable: 'KUBECONFIG')]) {
+                        sh """
+                            # Update image tags in all deployments
+                            kubectl set image deployment/api-service \
+                              api-service=${ECR_REPO_API}:${IMAGE_TAG} \
+                              -n ${DEPLOY_NAMESPACE}
+
+                            kubectl set image deployment/ingestion-service \
+                              ingestion-service=${ECR_REPO_INGESTION}:${IMAGE_TAG} \
+                              -n deepblue-ingestion
+
+                            kubectl set image deployment/frontend \
+                              frontend=${ECR_REPO_FRONTEND}:${IMAGE_TAG} \
+                              -n ${DEPLOY_NAMESPACE}
+
+                            # Wait for rollouts to complete
+                            kubectl rollout status deployment/api-service \
+                              -n ${DEPLOY_NAMESPACE} --timeout=300s
+
+                            kubectl rollout status deployment/ingestion-service \
+                              -n deepblue-ingestion --timeout=300s
+
+                            kubectl rollout status deployment/frontend \
+                              -n ${DEPLOY_NAMESPACE} --timeout=300s
+
+                            # Print pod status
+                            kubectl get pods -n ${DEPLOY_NAMESPACE}
+                            kubectl get pods -n deepblue-ingestion
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── Stage 10: Smoke Tests ─────────────────────────────────────────────
+        stage('Smoke Tests') {
+            when {
+                branch 'main'
+            }
+            steps {
+                container('python') {
+                    sh '''
+                        pip install httpx --quiet
+
+                        python3 -c "
+import httpx, sys, time
+
+BASE = 'https://api.deepblue.oceanresearch.io'
+ENDPOINTS = [
+    ('/health',              200),
+    ('/v1/sensors?limit=5',  200),
+    ('/v1/alerts?limit=5',   200),
+    ('/v1/climate/summary',  200),
+]
+
+print('Running smoke tests against:', BASE)
+failed = 0
+for path, expected in ENDPOINTS:
+    try:
+        r = httpx.get(BASE + path, timeout=10)
+        status = '✓ PASS' if r.status_code == expected else '✗ FAIL'
+        if r.status_code != expected:
+            failed += 1
+        print(f'  {status}  {r.status_code}  {path}')
+    except Exception as e:
+        print(f'  ✗ ERROR  {path}: {e}')
+        failed += 1
+
+if failed > 0:
+    print(f'\\n{failed} smoke test(s) failed')
+    sys.exit(1)
+else:
+    print('\\nAll smoke tests passed!')
+"
+                    '''
+                }
+            }
+        }
+    }
+
+    // ── Post Actions ──────────────────────────────────────────────────────────
+    post {
+        always {
+            echo "Pipeline completed — Branch: ${env.BRANCH_NAME} | Build: ${env.BUILD_NUMBER}"
+            cleanWs()
+        }
+        success {
+            slackSend(
+                channel: "${SLACK_CHANNEL}",
+                color: 'good',
+                message: """
+✅ *DeepBlue Build SUCCESS*
+Branch: `${env.BRANCH_NAME}` | Image: `${env.IMAGE_TAG}`
+Author: ${env.GIT_AUTHOR} — ${env.GIT_MSG}
+<${env.BUILD_URL}|View Build>
+                """.stripIndent()
+            )
+        }
+        failure {
+            slackSend(
+                channel: "${SLACK_CHANNEL}",
+                color: 'danger',
+                message: """
+❌ *DeepBlue Build FAILED*
+Branch: `${env.BRANCH_NAME}` | Stage: `${env.STAGE_NAME}`
+Author: ${env.GIT_AUTHOR} — ${env.GIT_MSG}
+<${env.BUILD_URL}|View Build Logs>
+                """.stripIndent()
+            )
+            emailext(
+                subject: "[FAILED] DeepBlue Build #${env.BUILD_NUMBER}",
+                body: "Build failed at stage: ${env.STAGE_NAME}. See ${env.BUILD_URL}",
+                to: 'devops@deepblue.oceanresearch.io'
+            )
+        }
+        unstable {
+            slackSend(
+                channel: "${SLACK_CHANNEL}",
+                color: 'warning',
+                message: "⚠️ *DeepBlue Build UNSTABLE* — Branch: `${env.BRANCH_NAME}` | <${env.BUILD_URL}|View>"
+            )
+        }
+    }
+}

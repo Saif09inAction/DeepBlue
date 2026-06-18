@@ -24,11 +24,12 @@ import {
   TrendingUp, TrendingDown, Activity, Zap, ArrowUpRight,
 } from "lucide-react";
 import {
-  sensors, alerts, vessels,
-  temperatureTrend, ingestionVolume, alertDistribution, basinSensorCount, waveHeightTrend,
+  temperatureTrend, ingestionVolume, waveHeightTrend,
   generateActivity, type ActivityItem,
 } from "../data/mockData";
 import { cn, formatRelative } from "../lib/utils";
+import { api } from "../api/client";
+import { useApi } from "../api/useApi";
 
 function AnimatedValue({ end, active }: { end: number; active: boolean }) {
   const count = useCountUp(active ? end : 0);
@@ -181,17 +182,44 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 export default function Dashboard() {
-  const onlineSensors  = sensors.filter(s => s.status === "online").length;
-  const critAlerts     = alerts.filter(a => a.severity === "critical" && a.status === "firing").length;
-  const activeVessels  = vessels.filter(v => v.status === "online").length;
+  const { data: health }  = useApi(api.health,  null, 10_000);
+  const { data: basins }  = useApi(api.oceanBasins, null, 20_000);
+  const { data: ingest }  = useApi(() => api.ingestion(20), null, 8_000);
+  const { data: alertStats } = useApi(api.alertStats, null, 10_000);
+
+  const onlineSensors = health?.sensors_online  ?? 0;
+  const activeAlerts  = health?.active_alerts   ?? 0;
+  const ingestionRate = ingest?.ingestion_rate_eps ?? 0;
+  const bufferSize    = ingest?.buffer_size ?? 0;
+
+  // Build basin chart from live API data
+  const basinSensorCount = basins
+    ? Object.entries(basins.ocean_basins).map(([key, val]) => ({
+        name: key.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
+        value: val.total_sensors,
+      }))
+    : [];
+
+  // Alert distribution from live API
+  const alertDistribution = alertStats
+    ? [
+        { name: "Critical", value: alertStats.critical,                                      fill: "#ef4444" },
+        { name: "Warning",  value: alertStats.warning,                                       fill: "#f59e0b" },
+        { name: "Resolved", value: Math.max(0, alertStats.total_alerts - alertStats.critical - alertStats.warning), fill: "#10b981" },
+      ]
+    : [
+        { name: "Critical", value: 0, fill: "#ef4444" },
+        { name: "Warning",  value: 0, fill: "#f59e0b" },
+        { name: "Resolved", value: 0, fill: "#10b981" },
+      ];
 
   const kpis = [
-    { icon: Waves,         label: "Active Sensors",      value: onlineSensors,  unit:"",     delta: 4.2,  color:"bg-ocean-400"  },
-    { icon: Ship,          label: "Research Vessels",     value: activeVessels,  unit:"",     delta: 0,    color:"bg-cyan-400"   },
-    { icon: Satellite,     label: "Satellite Feeds",      value: 12,             unit:"",     delta: 8.3,  color:"bg-purple-400" },
-    { icon: Globe2,        label: "Ocean Basins",         value: 7,              unit:"",     delta: 0,    color:"bg-emerald-400"},
-    { icon: AlertTriangle, label: "Active Alerts",        value: critAlerts,     unit:"",     delta: -12,  color:"bg-red-400"    },
-    { icon: Database,      label: "Data Processed Today", value: 48,             unit:"TB",   delta: 22.1, color:"bg-amber-400"  },
+    { icon: Waves,         label: "Active Sensors",      value: onlineSensors,       unit:"",    delta: 4.2,  color:"bg-ocean-400"  },
+    { icon: Ship,          label: "Research Vessels",     value: 8,                   unit:"",    delta: 0,    color:"bg-cyan-400"   },
+    { icon: Satellite,     label: "Satellite Feeds",      value: 12,                  unit:"",    delta: 8.3,  color:"bg-purple-400" },
+    { icon: Globe2,        label: "Ocean Basins",         value: basins ? Object.keys(basins.ocean_basins).length : 7, unit:"", delta: 0, color:"bg-emerald-400"},
+    { icon: AlertTriangle, label: "Active Alerts",        value: activeAlerts,        unit:"",    delta: -12,  color:"bg-red-400"    },
+    { icon: Database,      label: "Buffer Events",        value: bufferSize,          unit:"",    delta: 22.1, color:"bg-amber-400"  },
   ];
 
   return (
@@ -215,14 +243,14 @@ export default function Dashboard() {
               DeepBlue Intelligence Platform
             </h1>
             <p className="text-slate-400 text-sm">
-              Real-time oceanographic monitoring across 7 ocean basins · 100 active sensors · v2.4.1
+              Real-time oceanographic monitoring across {basins ? Object.keys(basins.ocean_basins).length : 7} ocean basins · {onlineSensors || "—"} active sensors · v{health?.version ?? "2.4.1"}
             </p>
             <div className="flex items-center gap-4 mt-4">
               {[
-                { label:"Ingestion Rate",   value:"12.5K ev/s",  up: true  },
-                { label:"API Latency P99",  value:"142ms",        up: false },
-                { label:"System Health",    value:"99.97%",       up: true  },
-                { label:"Storage Used",     value:"68.4 TB",      up: false },
+                { label:"Ingestion Rate",   value: ingestionRate > 0 ? `${ingestionRate.toFixed(1)} ev/s` : "—",  up: true  },
+                { label:"Kafka Lag Topics", value: ingest ? Object.keys(ingest.kafka_lag).length + " topics" : "—", up: false },
+                { label:"System Health",    value: health?.status === "healthy" ? "99.97%" : "Degraded", up: health?.status === "healthy" },
+                { label:"Buffer Events",    value: bufferSize > 0 ? bufferSize.toLocaleString() : "—", up: false },
               ].map(stat => (
                 <div key={stat.label} className="flex items-center gap-1.5">
                   <ArrowUpRight className={cn("w-3 h-3", stat.up ? "text-green-400" : "text-red-400",

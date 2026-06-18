@@ -1,9 +1,11 @@
 import { useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Bell, Search, Filter, AlertTriangle, Info, CheckCircle, Clock, MapPin, Cpu } from "lucide-react";
-import { alerts as allAlerts } from "../data/mockData";
+import { Bell, Search, AlertTriangle, Info, CheckCircle, Clock, MapPin, Cpu } from "lucide-react";
 import type { Alert } from "../types";
 import { cn, formatRelative, basinLabel } from "../lib/utils";
+import { api } from "../api/client";
+import { useApi } from "../api/useApi";
+import { mapAlert } from "../api/mappers";
 
 const SEV_ICON = {
   critical: AlertTriangle,
@@ -132,6 +134,9 @@ export default function AlertCenter() {
   const [statusFilter,   setStat]   = useState<string>("all");
   const [sortBy,         setSort]   = useState<"time" | "severity">("time");
 
+  const { data: raw } = useApi(() => api.alerts(100), { total: 0, alerts: [] }, 10_000);
+  const allAlerts: Alert[] = (raw?.alerts ?? []).map(mapAlert);
+
   const filtered = useMemo(() => {
     let arr = allAlerts;
     if (search)               arr = arr.filter(a => a.title.toLowerCase().includes(search.toLowerCase()) ||
@@ -139,12 +144,13 @@ export default function AlertCenter() {
     if (severityFilter !== "all") arr = arr.filter(a => a.severity === severityFilter);
     if (statusFilter   !== "all") arr = arr.filter(a => a.status   === statusFilter);
     if (sortBy === "severity")    arr = [...arr].sort((a,b) => {
-      const order = { critical:0, warning:1, info:2 };
-      return order[a.severity] - order[b.severity];
+      const order: Record<string,number> = { critical:0, warning:1, info:2 };
+      return (order[a.severity] ?? 2) - (order[b.severity] ?? 2);
     });
     else arr = [...arr].sort((a,b) => new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime());
     return arr;
-  }, [search, severityFilter, statusFilter, sortBy]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allAlerts, search, severityFilter, statusFilter, sortBy]);
 
   const stats = {
     critical:     allAlerts.filter(a => a.severity==="critical" && a.status==="firing").length,
@@ -158,7 +164,7 @@ export default function AlertCenter() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-bold text-white">Alert Center</h2>
-          <p className="text-slate-500 text-sm mt-0.5">{allAlerts.length} total alerts across all ocean basins</p>
+          <p className="text-slate-500 text-sm mt-0.5">{raw?.total ?? allAlerts.length} total alerts across all ocean basins</p>
         </div>
         <div className="flex items-center gap-1.5">
           <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse-slow" />

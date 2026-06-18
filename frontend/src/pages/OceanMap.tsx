@@ -1,11 +1,14 @@
 import { useState, useEffect } from "react";
 import { MapContainer, TileLayer, CircleMarker, Popup } from "react-leaflet";
-import { motion, AnimatePresence } from "framer-motion";
-import { Thermometer, Droplets, Gauge, Waves, Wind, FlaskConical, Filter, X } from "lucide-react";
+import { motion } from "framer-motion";
+import { Thermometer, Droplets, Gauge, Waves, Wind, FlaskConical, Filter } from "lucide-react";
 import "leaflet/dist/leaflet.css";
-import { sensors, vessels } from "../data/mockData";
+import { vessels } from "../data/mockData";
 import type { Sensor, OceanBasin } from "../types";
 import { cn, basinLabel, formatRelative } from "../lib/utils";
+import { api } from "../api/client";
+import { useApi } from "../api/useApi";
+import { mapSensor } from "../api/mappers";
 
 const STATUS_COLOR: Record<string, string> = {
   online:   "#10b981",
@@ -70,11 +73,14 @@ function SensorPopup({ s }: { s: Sensor }) {
 }
 
 export default function OceanMap() {
-  const [selectedBasin, setSelectedBasin] = useState<OceanBasin | "all">("all");
-  const [selectedType,  setSelectedType]  = useState<string>("all");
-  const [showVessels,   setShowVessels]   = useState(true);
+  const [selectedBasin,  setSelectedBasin]  = useState<OceanBasin | "all">("all");
+  const [selectedType,   setSelectedType]   = useState<string>("all");
+  const [showVessels,    setShowVessels]    = useState(true);
   const [selectedSensor, setSelectedSensor] = useState<Sensor | null>(null);
   const [stats, setStats] = useState({ online: 0, warning: 0, critical: 0 });
+
+  const { data: raw } = useApi(() => api.sensors(200), { total: 0, sensors: [] }, 15_000);
+  const sensors = (raw?.sensors ?? []).map(mapSensor);
 
   const types = ["all", ...Array.from(new Set(sensors.map(s => s.type)))];
 

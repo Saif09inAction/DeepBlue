@@ -1,15 +1,14 @@
 /**
  * DeepBlue API Client
- * Connects to the FastAPI backend at http://localhost:8000
+ * All requests go through the Vite dev proxy → FastAPI at http://localhost:8000
+ * No CORS issues, no hardcoded base URL.
  */
-
-const BASE = "http://localhost:8000";
 const API_KEY = "deepblue-demo-key-2026";
 
 const headers = { "X-Api-Key": API_KEY, "Content-Type": "application/json" };
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { headers });
+  const res = await fetch(path, { headers });
   if (!res.ok) throw new Error(`API ${path} → ${res.status}`);
   return res.json();
 }
@@ -110,10 +109,10 @@ export interface APIInfraStatus {
   timestamp:          string;
 }
 
-// ── API calls ────────────────────────────────────────────────────────────────
+// ── API calls (all paths are relative → routed through Vite proxy) ───────────
 export const api = {
   health:      ()             => get<APIHealth>("/health"),
-  overview:    ()             => get<APIOverview>("/"),
+  overview:    ()             => get<APIOverview>("/api-root"),
   sensors:     (limit = 100)  => get<{ total: number; sensors: APISensor[] }>(`/v1/sensors?limit=${limit}`),
   sensor:      (id: string)   => get<APISensor>(`/v1/sensors/${id}`),
   oceanBasins: ()             => get<APIBasinSummary>("/v1/ocean-basins"),

@@ -79,7 +79,7 @@ export default function OceanMap() {
   const [selectedSensor, setSelectedSensor] = useState<Sensor | null>(null);
   const [stats, setStats] = useState({ online: 0, warning: 0, critical: 0 });
 
-  const { data: raw } = useApi(() => api.sensors(200), { total: 0, sensors: [] }, 15_000);
+  const { data: raw, loading: sensorsLoading } = useApi(() => api.sensors(200), { total: 0, sensors: [] }, 15_000);
   const sensors = (raw?.sensors ?? []).map(mapSensor);
 
   const types = ["all", ...Array.from(new Set(sensors.map(s => s.type)))];
@@ -232,30 +232,39 @@ export default function OceanMap() {
 
         {/* Summary panel */}
         <div className="absolute top-4 right-4 glass-card p-3 z-[1000] text-xs w-44">
-          <p className="font-semibold text-white mb-2">Showing {filtered.length} sensors</p>
-          <p className="text-slate-500">{basinLabel(selectedBasin)} · {selectedType}</p>
-          <div className="mt-2 space-y-1">
-            {[
-              { label: "Online",   pct: stats.online   / filtered.length * 100, color: "bg-green-400"  },
-              { label: "Warning",  pct: stats.warning  / filtered.length * 100, color: "bg-yellow-400" },
-              { label: "Critical", pct: stats.critical / filtered.length * 100, color: "bg-red-400"    },
-            ].map(b => (
-              <div key={b.label}>
-                <div className="flex justify-between mb-0.5">
-                  <span className="text-slate-500">{b.label}</span>
-                  <span className="text-white font-medium">{Math.round(b.pct)}%</span>
-                </div>
-                <div className="h-1 bg-deep-600 rounded-full overflow-hidden">
-                  <motion.div
-                    className={cn("h-full rounded-full", b.color)}
-                    initial={{ width: 0 }}
-                    animate={{ width: `${b.pct}%` }}
-                    transition={{ duration: 1, delay: 0.3 }}
-                  />
-                </div>
+          {sensorsLoading ? (
+            <p className="text-slate-400 text-center py-2">Loading sensors…</p>
+          ) : (
+            <>
+              <p className="font-semibold text-white mb-2">Showing {filtered.length} sensors</p>
+              <p className="text-slate-500">{basinLabel(selectedBasin)} · {selectedType}</p>
+              <div className="mt-2 space-y-1">
+                {[
+                  { label: "Online",   count: stats.online,   color: "bg-green-400"  },
+                  { label: "Warning",  count: stats.warning,  color: "bg-yellow-400" },
+                  { label: "Critical", count: stats.critical, color: "bg-red-400"    },
+                ].map(b => {
+                  const pct = filtered.length > 0 ? (b.count / filtered.length) * 100 : 0;
+                  return (
+                    <div key={b.label}>
+                      <div className="flex justify-between mb-0.5">
+                        <span className="text-slate-500">{b.label}</span>
+                        <span className="text-white font-medium">{Math.round(pct)}%</span>
+                      </div>
+                      <div className="h-1 bg-deep-600 rounded-full overflow-hidden">
+                        <motion.div
+                          className={cn("h-full rounded-full", b.color)}
+                          initial={{ width: 0 }}
+                          animate={{ width: `${pct}%` }}
+                          transition={{ duration: 1, delay: 0.3 }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
-          </div>
+            </>
+          )}
         </div>
       </div>
     </div>

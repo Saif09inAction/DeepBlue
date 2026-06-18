@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { Bell, Search, Maximize2, RefreshCw, Wifi, WifiOff } from "lucide-react";
 import { alerts } from "../../data/mockData";
@@ -133,9 +134,10 @@ export default function Navbar() {
                   ))}
                 </div>
                 <div className="px-4 py-2 text-center">
-                  <a href="/alerts" className="text-xs text-ocean-400 hover:text-ocean-300 transition-colors">
+                  <Link to="/alerts" onClick={() => setShowAlerts(false)}
+                    className="text-xs text-ocean-400 hover:text-ocean-300 transition-colors">
                     View all alerts →
-                  </a>
+                  </Link>
                 </div>
               </motion.div>
             )}

@@ -1,0 +1,344 @@
+################################################################################
+# DeepBlue — Main CI/CD Pipeline
+# Runs on every push and pull request
+#
+# Jobs:
+#   1. lint-frontend   — ESLint + TypeScript check
+#   2. test-backend    — Pytest + API smoke tests
+#   3. security-scan   — Trivy filesystem scan
+#   4. build-images    — Docker build (no push on PRs)
+#   5. push-ecr        — Push to ECR (main branch only)
+#   6. deploy-staging  — Update staging EKS (main branch only)
+#   7. integration-test— Smoke tests against staging
+################################################################################
+
+name: DeepBlue CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+
+  # ── Job 1: Frontend Lint & Type Check ──────────────────────────────────────
+  lint-frontend:
+    name: Frontend — Lint & TypeScript
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: Build check (ensure no build errors)
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 3
+
+  # ── Job 2: Backend Tests ────────────────────────────────────────────────────
+  test-backend:
+    name: Backend — Tests & Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: demo/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -v \
+            --tb=short \
+            --junitxml=pytest-results.xml \
+            --cov=. \
+            --cov-report=xml:coverage.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-results
+          path: |
+            demo/pytest-results.xml
+            demo/coverage.xml
+
+  # ── Job 3: Security Scan ────────────────────────────────────────────────────
+  security-scan:
+    name: Security — Trivy Scan
+    runs-on: ubuntu-latest
+    needs: [lint-frontend, test-backend]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '0'
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Check for secrets
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'secret'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+
+  # ── Job 4: Build Docker Images ──────────────────────────────────────────────
+  build-images:
+    name: Docker — Build Images
+    runs-on: ubuntu-latest
+    needs: [security-scan]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API service image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfiles/api-service.Dockerfile
+          push: false
+          tags: deepblue/api-service:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Ingestion service image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfiles/ingestion-service.Dockerfile
+          push: false
+          tags: deepblue/ingestion-service:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: false
+          tags: deepblue/frontend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan built images with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: 'deepblue/api-service:${{ github.sha }}'
+          severity: 'CRITICAL'
+          exit-code: '0'
+
+  # ── Job 5: Push to ECR (main branch only) ───────────────────────────────────
+  push-ecr:
+    name: Push Images to ECR
+    runs-on: ubuntu-latest
+    needs: [build-images]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push API service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfiles/api-service.Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/deepblue-api-service:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REGISTRY }}/deepblue-api-service:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Ingestion service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfiles/ingestion-service.Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/deepblue-ingestion-service:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REGISTRY }}/deepblue-ingestion-service:latest
+
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/deepblue-frontend:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REGISTRY }}/deepblue-frontend:latest
+
+      - name: Output image digests
+        run: |
+          echo "API Service:        ${{ env.ECR_REGISTRY }}/deepblue-api-service:${{ env.IMAGE_TAG }}"
+          echo "Ingestion Service:  ${{ env.ECR_REGISTRY }}/deepblue-ingestion-service:${{ env.IMAGE_TAG }}"
+          echo "Frontend:           ${{ env.ECR_REGISTRY }}/deepblue-frontend:${{ env.IMAGE_TAG }}"
+
+  # ── Job 6: Deploy to Staging ────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging (EKS)
+    runs-on: ubuntu-latest
+    needs: [push-ecr]
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name deepblue-staging-eks \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy to EKS staging
+        run: |
+          kubectl set image deployment/api-service \
+            api-service=${{ env.ECR_REGISTRY }}/deepblue-api-service:${{ env.IMAGE_TAG }} \
+            -n deepblue-api
+
+          kubectl set image deployment/ingestion-service \
+            ingestion-service=${{ env.ECR_REGISTRY }}/deepblue-ingestion-service:${{ env.IMAGE_TAG }} \
+            -n deepblue-ingestion
+
+          kubectl set image deployment/frontend \
+            frontend=${{ env.ECR_REGISTRY }}/deepblue-frontend:${{ env.IMAGE_TAG }} \
+            -n deepblue-api
+
+          kubectl rollout status deployment/api-service -n deepblue-api --timeout=120s
+          kubectl rollout status deployment/frontend -n deepblue-api --timeout=120s
+
+      - name: Show deployment status
+        run: kubectl get pods -n deepblue-api -o wide
+
+  # ── Job 7: Integration / Smoke Tests ────────────────────────────────────────
+  integration-tests:
+    name: Smoke Tests (Staging)
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install httpx
+        run: pip install httpx
+
+      - name: Run smoke tests
+        env:
+          API_BASE: ${{ secrets.STAGING_API_URL }}
+        run: python demo/tests/smoke_tests.py
+
+      - name: Notify Slack on success
+        if: success()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "✅ DeepBlue staging deploy successful!\nCommit: `${{ github.sha }}`\nAuthor: ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "❌ DeepBlue CI/CD FAILED at job: ${{ github.job }}\nCommit: `${{ github.sha }}`\nAuthor: ${{ github.actor }}\nDetails: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
